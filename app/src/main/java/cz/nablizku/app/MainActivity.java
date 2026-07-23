@@ -2,14 +2,22 @@ package cz.nablizku.app;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlarmManager;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.role.RoleManager;
+import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.ContactsContract;
 import android.provider.Telephony;
 import android.view.Gravity;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -19,7 +27,14 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 public class MainActivity extends Activity {
+    private static final int SMS_PERMISSION_REQUEST = 43;
+    private static final int CONTACTS_PERMISSION_REQUEST = 44;
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 45;
+    private static final String REMINDER_CHANNEL = "nablizku_reminders";
     private LinearLayout root;
     private WebView webView;
 
@@ -38,10 +53,13 @@ public class MainActivity extends Activity {
         navigation.setPadding(12, 12, 12, 12);
         navigation.setBackgroundColor(Color.rgb(23, 57, 92));
         Button home = button("Nablízku");
+        Button contacts = button("Kontakty");
         Button messages = button("SMS ochrana");
         home.setOnClickListener(v -> showWeb());
+        contacts.setOnClickListener(v -> requestContacts());
         messages.setOnClickListener(v -> showMessages());
         navigation.addView(home, new LinearLayout.LayoutParams(0, 56, 1));
+        navigation.addView(contacts, new LinearLayout.LayoutParams(0, 56, 1));
         navigation.addView(messages, new LinearLayout.LayoutParams(0, 56, 1));
         root.addView(navigation);
 
@@ -50,7 +68,14 @@ public class MainActivity extends Activity {
             WebSettings settings = webView.getSettings();
             settings.setJavaScriptEnabled(true);
             settings.setDomStorageEnabled(true);
-            webView.setWebViewClient(new WebViewClient());
+            webView.addJavascriptInterface(new NativeBridge(), "NablizkuAndroid");
+            webView.setWebViewClient(new WebViewClient() {
+                @Override
+                public void onPageCommitVisible(WebView view, String url) {
+                    super.onPageCommitVisible(view, url);
+                    injectNativeCompatibility();
+                }
+            });
             webView.loadUrl("https://nablizku-seniorum.czechoslovakiaserver.chatgpt.site/");
             root.addView(webView, new LinearLayout.LayoutParams(-1, 0, 1));
         } catch (RuntimeException error) {
@@ -170,13 +195,13 @@ public class MainActivity extends Activity {
                     Manifest.permission.RECEIVE_SMS,
                     Manifest.permission.SEND_SMS,
                     Manifest.permission.POST_NOTIFICATIONS
-                }, 43);
+                }, SMS_PERMISSION_REQUEST);
             } else {
                 requestPermissions(new String[]{
                     Manifest.permission.READ_SMS,
                     Manifest.permission.RECEIVE_SMS,
                     Manifest.permission.SEND_SMS
-                }, 43);
+                }, SMS_PERMISSION_REQUEST);
             }
         } catch (RuntimeException error) {
             Toast.makeText(this, "Oprávnění se nepodařilo otevřít.", Toast.LENGTH_LONG).show();
@@ -186,7 +211,221 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == 43) requestSmsRole();
+        if (requestCode == SMS_PERMISSION_REQUEST) requestSmsRole();
+        if (requestCode == CONTACTS_PERMISSION_REQUEST
+            && grantResults.length > 0
+            && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            sendContactsToWeb();
+        }
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST
+            && grantResults.length > 0
+            && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            showNativeNotification("Nablízku", "Upozornění jsou zapnutá.", 1001);
+        }
+    }
+
+    private void requestContacts() {
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+            sendContactsToWeb();
+        } else {
+            requestPermissions(new String[]{Manifest.permission.READ_CONTACTS}, CONTACTS_PERMISSION_REQUEST);
+        }
+    }
+
+    private void sendContactsToWeb() {
+        JSONArray contacts = new JSONArray();
+        try (Cursor cursor = getContentResolver().query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            new String[]{
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER
+            },
+            null,
+            null,
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+        )) {
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    JSONObject contact = new JSONObject();
+                    contact.put("name", cursor.getString(0));
+                    contact.put("phone", cursor.getString(1));
+                    contacts.put(contact);
+                }
+            }
+        } catch (Exception error) {
+            Toast.makeText(this, "Kontakty se nepodařilo načíst.", Toast.LENGTH_LONG).show();
+        }
+        final String payload = JSONObject.quote(contacts.toString());
+        webView.evaluateJavascript(
+            "localStorage.setItem('nablizku-contacts'," + payload + ");" +
+            "window.dispatchEvent(new CustomEvent('nablizku-contacts',{detail:JSON.parse(" + payload + ")}));" +
+            "location.reload();",
+            null
+        );
+    }
+
+    private void enableNativeNotifications() {
+        createReminderChannel();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+            && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                NOTIFICATION_PERMISSION_REQUEST
+            );
+        } else {
+            showNativeNotification("Nablízku", "Upozornění jsou zapnutá.", 1001);
+        }
+    }
+
+    private void createReminderChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            manager.createNotificationChannel(new NotificationChannel(
+                REMINDER_CHANNEL,
+                "Připomínky léků a plánů",
+                NotificationManager.IMPORTANCE_HIGH
+            ));
+        }
+    }
+
+    private void showNativeNotification(String title, String body, int id) {
+        createReminderChannel();
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        android.app.Notification notification =
+            new android.app.Notification.Builder(this, REMINDER_CHANNEL)
+                .setSmallIcon(cz.nablizku.app.R.drawable.app_icon)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(new android.app.Notification.BigTextStyle().bigText(body))
+                .setAutoCancel(true)
+                .build();
+        manager.notify(id, notification);
+    }
+
+    private void scheduleNativeReminders(String json) {
+        try {
+            JSONArray reminders = new JSONArray(json);
+            AlarmManager alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+            for (int index = 0; index < reminders.length(); index++) {
+                JSONObject reminder = reminders.getJSONObject(index);
+                long timestamp = reminder.getLong("timestamp");
+                if (timestamp <= System.currentTimeMillis()) continue;
+                int id = reminder.getString("id").hashCode();
+                Intent intent = new Intent(this, ReminderReceiver.class);
+                intent.putExtra("title", reminder.getString("title"));
+                intent.putExtra("body", reminder.getString("body"));
+                intent.putExtra("notificationId", id);
+                PendingIntent pendingIntent = PendingIntent.getBroadcast(
+                    this,
+                    id,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                );
+                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, timestamp, pendingIntent);
+            }
+        } catch (Exception error) {
+            Toast.makeText(this, "Připomínky se nepodařilo naplánovat.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void scheduleSingleReminder(long timestamp, String title, String body, String id) {
+        try {
+            JSONArray reminders = new JSONArray();
+            JSONObject reminder = new JSONObject();
+            reminder.put("timestamp", timestamp);
+            reminder.put("title", title);
+            reminder.put("body", body);
+            reminder.put("id", id);
+            reminders.put(reminder);
+            scheduleNativeReminders(reminders.toString());
+        } catch (Exception error) {
+            Toast.makeText(this, "Připomínku se nepodařilo naplánovat.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void injectNativeCompatibility() {
+        String script =
+            "(function(){" +
+            "if(window.__nablizkuNativeReady)return;window.__nablizkuNativeReady=true;" +
+            "var pendingTimes=[];var originalTimeout=window.setTimeout.bind(window);" +
+            "window.setTimeout=function(fn,delay){" +
+                "var args=Array.prototype.slice.call(arguments,2);" +
+                "if(Number(delay)>5000){" +
+                    "pendingTimes.push(Date.now()+Number(delay));" +
+                    "return originalTimeout(function(){fn.apply(window,args);},0);" +
+                "}" +
+                "return originalTimeout(function(){fn.apply(window,args);},delay);" +
+            "};" +
+            "var registration={showNotification:function(title,options){" +
+                "var at=pendingTimes.length?pendingTimes.shift():Date.now();" +
+                "var body=options&&options.body?String(options.body):'';" +
+                "var id=options&&options.tag?String(options.tag):String(Date.now());" +
+                "if(at>Date.now()+1000)NablizkuAndroid.scheduleReminder(at,String(title),body,id);" +
+                "else NablizkuAndroid.showNotification(String(title),body);" +
+                "return Promise.resolve();" +
+            "}};" +
+            "try{Object.defineProperty(navigator,'serviceWorker',{configurable:true,value:{" +
+                "register:function(){return Promise.resolve(registration);}," +
+                "ready:Promise.resolve(registration)" +
+            "}});}catch(e){}" +
+            "try{Object.defineProperty(navigator,'contacts',{configurable:true,value:{" +
+                "select:function(){return new Promise(function(resolve,reject){" +
+                    "var handler=function(event){" +
+                        "window.removeEventListener('nablizku-contacts',handler);" +
+                        "var data=event.detail||[];" +
+                        "resolve(data.map(function(item){return{name:[item.name],tel:[item.phone]};}));" +
+                    "};" +
+                    "window.addEventListener('nablizku-contacts',handler);" +
+                    "NablizkuAndroid.importContacts();" +
+                "});}" +
+            "}});}catch(e){}" +
+            "try{window.Notification=function(){};" +
+                "Object.defineProperty(window.Notification,'permission',{value:'granted'});" +
+                "window.Notification.requestPermission=function(){NablizkuAndroid.enableNotifications();return Promise.resolve('granted');};" +
+            "}catch(e){}" +
+            "window.dispatchEvent(new Event('nablizku-native-ready'));" +
+            "})();";
+        webView.evaluateJavascript(script, null);
+    }
+
+    private final class NativeBridge {
+        @JavascriptInterface
+        public void importContacts() {
+            runOnUiThread(() -> requestContacts());
+        }
+
+        @JavascriptInterface
+        public void enableNotifications() {
+            runOnUiThread(() -> enableNativeNotifications());
+        }
+
+        @JavascriptInterface
+        public void sendTestNotification() {
+            runOnUiThread(() -> showNativeNotification(
+                "Test připomínky léku",
+                "Oznámení funguje správně.",
+                (int) (System.currentTimeMillis() & 0x7fffffff)
+            ));
+        }
+
+        @JavascriptInterface
+        public void scheduleReminders(String json) {
+            runOnUiThread(() -> scheduleNativeReminders(json));
+        }
+
+        @JavascriptInterface
+        public void scheduleReminder(long timestamp, String title, String body, String id) {
+            runOnUiThread(() -> scheduleSingleReminder(timestamp, title, body, id));
+        }
+
+        @JavascriptInterface
+        public void showNotification(String title, String body) {
+            runOnUiThread(() -> showNativeNotification(
+                title,
+                body,
+                (int) (System.currentTimeMillis() & 0x7fffffff)
+            ));
+        }
     }
 
     @Override

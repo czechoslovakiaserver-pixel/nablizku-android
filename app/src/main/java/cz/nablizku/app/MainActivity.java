@@ -158,7 +158,7 @@ public class MainActivity extends Activity {
             new String[]{Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE},
             null,
             null,
-            Telephony.Sms.DATE + " DESC LIMIT 100"
+            Telephony.Sms.DATE + " DESC LIMIT 5"
         )) {
             if (cursor == null) return;
             while (cursor.moveToNext()) {
@@ -204,7 +204,7 @@ public class MainActivity extends Activity {
             new String[]{Telephony.Sms.BODY},
             null,
             null,
-            Telephony.Sms.DATE + " DESC LIMIT 100"
+            Telephony.Sms.DATE + " DESC LIMIT 5"
         )) {
             if (cursor != null) {
                 while (cursor.moveToNext()) {

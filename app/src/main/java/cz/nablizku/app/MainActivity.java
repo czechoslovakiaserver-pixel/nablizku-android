@@ -116,6 +116,21 @@ public class MainActivity extends Activity {
         title.setGravity(Gravity.START);
         list.addView(title);
 
+        Button importSms = new Button(this);
+        importSms.setText("Načíst SMS z telefonu");
+        importSms.setTextSize(18);
+        importSms.setOnClickListener(v -> {
+            if (checkSelfPermission(Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED) {
+                showMessages();
+                Toast.makeText(this, "SMS byly znovu načteny a zkontrolovány.", Toast.LENGTH_SHORT).show();
+            } else {
+                requestRuntimePermissions();
+            }
+        });
+        LinearLayout.LayoutParams importParams = new LinearLayout.LayoutParams(-1, -2);
+        importParams.setMargins(0, 16, 0, 20);
+        list.addView(importSms, importParams);
+
         if (checkSelfPermission(Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) {
             list.addView(text(
                 "Pro zobrazení zpráv povolte přístup k SMS a nastavte Nablízku jako výchozí SMS aplikaci.",
@@ -211,7 +226,10 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == SMS_PERMISSION_REQUEST) requestSmsRole();
+        if (requestCode == SMS_PERMISSION_REQUEST) {
+            showMessages();
+            requestSmsRole();
+        }
         if (requestCode == CONTACTS_PERMISSION_REQUEST
             && grantResults.length > 0
             && grantResults[0] == PackageManager.PERMISSION_GRANTED) {

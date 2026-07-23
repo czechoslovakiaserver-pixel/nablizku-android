@@ -152,6 +152,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadMessages(LinearLayout list) {
+        int loaded = 0;
         try (Cursor cursor = getContentResolver().query(
             Telephony.Sms.Inbox.CONTENT_URI,
             new String[]{Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE},
@@ -161,6 +162,7 @@ public class MainActivity extends Activity {
         )) {
             if (cursor == null) return;
             while (cursor.moveToNext()) {
+                loaded++;
                 String sender = cursor.getString(0);
                 String body = cursor.getString(1);
                 int score = ScamAnalyzer.score(body);
@@ -171,14 +173,48 @@ public class MainActivity extends Activity {
                     score >= 4 ? Color.rgb(145, 53, 43) : Color.rgb(32, 48, 57)
                 );
                 card.setPadding(18, 18, 18, 18);
-                card.setBackgroundColor(score >= 4 ? Color.rgb(255, 232, 226) : Color.WHITE);
+                card.setBackgroundColor(
+                    score >= 4
+                        ? Color.rgb(255, 232, 226)
+                        : score >= 2 ? Color.rgb(255, 244, 214) : Color.WHITE
+                );
                 LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
                 params.setMargins(0, 12, 0, 0);
                 list.addView(card, params);
             }
+            if (loaded == 0) {
+                list.addView(text(
+                    "V telefonu nebyly nalezeny žádné přijaté SMS.",
+                    18,
+                    Color.DKGRAY
+                ));
+            }
         } catch (RuntimeException error) {
             list.addView(text("Zprávy se nepodařilo načíst.", 18, Color.rgb(145, 53, 43)));
         }
+    }
+
+    private int countRiskyMessages() {
+        if (checkSelfPermission(Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) {
+            return 0;
+        }
+        int risky = 0;
+        try (Cursor cursor = getContentResolver().query(
+            Telephony.Sms.Inbox.CONTENT_URI,
+            new String[]{Telephony.Sms.BODY},
+            null,
+            null,
+            Telephony.Sms.DATE + " DESC LIMIT 100"
+        )) {
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    if (ScamAnalyzer.score(cursor.getString(0)) >= 2) risky++;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            return 0;
+        }
+        return risky;
     }
 
     private TextView text(String value, int size, int color) {
@@ -240,6 +276,12 @@ public class MainActivity extends Activity {
             && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             showNativeNotification("Nablízku", "Upozornění jsou zapnutá.", 1001);
         }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == 42) showMessages();
     }
 
     private void requestContacts() {
@@ -401,12 +443,41 @@ public class MainActivity extends Activity {
                 "Object.defineProperty(window.Notification,'permission',{value:'granted'});" +
                 "window.Notification.requestPermission=function(){NablizkuAndroid.enableNotifications();return Promise.resolve('granted');};" +
             "}catch(e){}" +
+            "function patchSmsTile(){" +
+                "var buttons=document.querySelectorAll('button.tile.mint');" +
+                "for(var i=0;i<buttons.length;i++){" +
+                    "var strong=buttons[i].querySelector('strong');" +
+                    "if(!strong||strong.textContent.indexOf('Moje zpr')<0)continue;" +
+                    "buttons[i].setAttribute('data-native-sms','true');" +
+                    "var count=Number(NablizkuAndroid.getRiskySmsCount());" +
+                    "var label=buttons[i].querySelector('span');" +
+                    "if(label)label.textContent=count===1?'1 riziková zpráva':count+' rizikových zpráv';" +
+                "}" +
+            "}" +
+            "document.addEventListener('click',function(event){" +
+                "var target=event.target&&event.target.closest?event.target.closest('button[data-native-sms=true]'):null;" +
+                "if(!target)return;" +
+                "event.preventDefault();event.stopPropagation();event.stopImmediatePropagation();" +
+                "NablizkuAndroid.openSmsProtection();" +
+            "},true);" +
+            "new MutationObserver(patchSmsTile).observe(document.documentElement,{childList:true,subtree:true});" +
+            "patchSmsTile();" +
             "window.dispatchEvent(new Event('nablizku-native-ready'));" +
             "})();";
         webView.evaluateJavascript(script, null);
     }
 
     private final class NativeBridge {
+        @JavascriptInterface
+        public void openSmsProtection() {
+            runOnUiThread(() -> showMessages());
+        }
+
+        @JavascriptInterface
+        public int getRiskySmsCount() {
+            return countRiskyMessages();
+        }
+
         @JavascriptInterface
         public void importContacts() {
             runOnUiThread(() -> requestContacts());
